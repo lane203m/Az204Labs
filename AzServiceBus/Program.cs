@@ -1,72 +1,86 @@
-﻿using Azure;
+﻿using Azure.Messaging.ServiceBus;
 using Azure.Identity;
-using Azure.Storage.Queues;
-using Azure.Storage.Queues.Models;
-using System;
-using System.Threading.Tasks;
-// Create a unique name for the queue
-// TODO: Replace the <YOUR-STORAGE-ACCT-NAME> placeholder 
-string queueName = "myqueue-" + Guid.NewGuid().ToString();
-string storageAccountName = "<YOUR-STORAGE-ACCT-NAME>";
+using System.Timers;
 
-// ADD CODE TO CREATE A QUEUE CLIENT AND CREATE A QUEUE
 
+// TODO: Replace <YOUR-NAMESPACE> with your Service Bus namespace
+string svcbusNameSpace = "<namespace>.servicebus.windows.net";
+string queueName = "myQueue";
+
+
+// ADD CODE TO CREATE A SERVICE BUS CLIENT
 DefaultAzureCredentialOptions options = new()
 {
     ExcludeEnvironmentCredential = true,
     ExcludeManagedIdentityCredential = true
 };
+ServiceBusClient client = new ServiceBusClient(svcbusNameSpace, new DefaultAzureCredential(options));
 
-QueueClient queueClient = new QueueClient(
-    new Uri($"https://{storageAccountName}.queue.core.windows.net/{queueName}"),
-    new DefaultAzureCredential(options));
-queueClient.CreateIfNotExists();
+// ADD CODE TO SEND MESSAGES TO THE QUEUE
 
-if (queueClient.Exists())
+ServiceBusSender sender = client.CreateSender(queueName);
+using ServiceBusMessageBatch messageBatch = await sender.CreateMessageBatchAsync();
+
+for (int i = 1; i <= 3; i++)
 {
-  queueClient.SendMessage("Hello, World!");
-  queueClient.SendMessage("Hello, World!2");
-  SendReceipt receipt = queueClient.SendMessage("Hello, World!3");
-
-  foreach (var msg in queueClient.PeekMessages(maxMessages: 10).Value)
-  {
-      Console.WriteLine($"Message: {msg.MessageText}");
+  if(!messageBatch.TryAddMessage(new ServiceBusMessage($"Message {i}"))){
+            throw new Exception($"The message {i} is too large to fit in the batch.");
   }
-
-
-
-  // ADD CODE TO SEND AND LIST MESSAGES
-
-  QueueMessage[] message = queueClient.ReceiveMessages().Value;
-  // ADD CODE TO UPDATE A MESSAGE AND LIST MESSAGES
-
-  Console.WriteLine($"Message before update: {message[0].MessageText}");
-  Console.WriteLine($"Body before update: {message[0].Body.ToString()}");
-  queueClient.UpdateMessage(message[0].MessageId,
-      message[0].PopReceipt,
-      "Updated Message",
-      TimeSpan.FromSeconds(0));
-
-  queueClient.UpdateMessage(receipt.MessageId,
-      receipt.PopReceipt,
-      "Updated Message for Receipt 3",
-      TimeSpan.FromSeconds(0));
-
-  foreach (var msg in queueClient.PeekMessages(maxMessages: 10).Value)
-  {
-      Console.WriteLine($"New Messages: {msg.MessageText}");
-  }
-
-
-
-  // ADD CODE TO DELETE MESSAGES AND THE QUEUE
-  
-  foreach (var msg in queueClient.ReceiveMessages(maxMessages: 10).Value)
-  {
-      Console.WriteLine($"Delete: {msg.MessageText}");
-      queueClient.DeleteMessage(msg.MessageId, msg.PopReceipt);
-  }
-  
-  
-  queueClient.Delete();
 }
+
+try
+{
+    await sender.SendMessagesAsync(messageBatch);
+    Console.WriteLine($"A batch of 3 messages has been published to the queue.");
+}
+finally
+{
+    await sender.DisposeAsync();
+}
+
+// ADD CODE TO PROCESS MESSAGES FROM THE QUEUE
+
+ServiceBusProcessor processor = client.CreateProcessor(queueName, new ServiceBusProcessorOptions());
+const int idleTimeoutMs = 3000;
+System.Timers.Timer idleTimer = new(idleTimeoutMs);
+idleTimer.Elapsed += async (s, e) =>
+{
+    Console.WriteLine($"No messages received for {idleTimeoutMs / 1000} seconds. Stopping processor...");
+    await processor.StopProcessingAsync();
+};
+
+try
+{
+  processor.ProcessMessageAsync += MessageHandler;
+  processor.ProcessErrorAsync += ErrorHandler;
+  idleTimer.Start();
+  await processor.StartProcessingAsync();
+  while (processor.IsProcessing)
+  {
+    await Task.Delay(500);
+  }
+  idleTimer.Stop();
+
+
+} finally
+{
+  await processor.DisposeAsync();
+}
+
+async Task MessageHandler(ProcessMessageEventArgs args)
+{
+    string body = args.Message.Body.ToString();
+    Console.WriteLine($"Received message: {body}");
+    idleTimer.Stop();
+    idleTimer.Start();
+    await args.CompleteMessageAsync(args.Message);
+}
+
+Task ErrorHandler(ProcessErrorEventArgs args)
+{
+  Console.WriteLine(args.Exception.ToString());
+  return Task.CompletedTask;
+}
+
+// Dispose client after use
+await client.DisposeAsync();
