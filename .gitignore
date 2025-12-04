@@ -4,6 +4,16 @@
 # Azure Functions localsettings file
 local.settings.json
 
+# Environment files with secrets
+.env
+*.env
+
+# Blazor specific
+**/wwwroot/_framework/
+**/.config/
+*.razor.g.cs
+*.razor.css
+
 # User-specific files
 *.suo
 *.user
